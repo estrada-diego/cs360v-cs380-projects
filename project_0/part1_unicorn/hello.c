@@ -2,7 +2,7 @@
  *
  * This opens a Unicorn virtual CPU and runs a short piece of x86-64 machine code
  * inside it:  mov eax, 40 ; add eax, 2 .  When it finishes, the emulated EAX
- * register holds 42.
+ * register holds 42. 
  *
  * Your task: read that result out of EAX and print it -- one number, nothing
  * else. Then run `make && ./hello`; it should print 42.
@@ -25,9 +25,8 @@ int main(void)
     if (err) { fprintf(stderr, "uc_emu_start: %s\n", uc_strerror(err)); return 1; }
 
     int eax = 0;
-    /* TODO(student): read the EAX register into `eax`.
-     *   uc_reg_read(uc, UC_X86_REG_EAX, &eax);
-     */
+    uc_reg_read(uc, UC_X86_REG_EAX, &eax);
+     
 
     uc_close(uc);
     printf("%d\n", eax);

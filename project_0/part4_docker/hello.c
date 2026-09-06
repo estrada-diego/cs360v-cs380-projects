@@ -19,9 +19,8 @@
 int main(int argc, char **argv)
 {
     char host[256] = "";
-    /* TODO(student): fill `host` with the container's hostname.
-     *   gethostname(host, sizeof host);
-     */
+    gethostname(host, sizeof host);
+     
 
     if (argc == 3 && strcmp(argv[1], "--serve") == 0) {
         struct sockaddr_in addr;
