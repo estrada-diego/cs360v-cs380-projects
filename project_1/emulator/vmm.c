@@ -46,6 +46,13 @@ static inline void serial_write(uc_engine *uc, uint64_t offset,
      *   - offset SERIAL_POWEROFF: record the exit code (`value`), mark the VM
      *                             powered off, and stop the CPU (uc_emu_stop).
      *   - anything else:          ignore. */
+     if (offset == SERIAL_TX) {
+        putchar(value & 0xFF);
+     } else if (offset == SERIAL_POWEROFF) {
+        v->exit_code = (int)value;
+        v->powered_off = 1;
+        uc_emu_stop(uc); 
+     }
 }
 
 /* ---- Guest memory faults ---------------------------------------------- */
@@ -139,6 +146,7 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
         uc_hook h;
         uc_hook_add(v->uc, &h, UC_HOOK_CODE, trace_code, NULL,
                     RAM_BASE, RAM_BASE + RAM_SIZE - 1);
+        
     }
     return 0;
 }
@@ -150,6 +158,7 @@ int vmm_load_binary(struct vmm *v, const char *path)
      * starting at v->ram (offset 0 == RAM_BASE), rejecting a file larger than
      * RAM_SIZE, then set the initial RIP to RAM_BASE (the entry point) with
      * uc_reg_write(UC_X86_REG_RIP, ...). Return 0 on success, -1 on error. */
+    v->ram = open
     return -1;
 }
 

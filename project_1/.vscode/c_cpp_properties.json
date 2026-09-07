@@ -1,0 +1,28 @@
+{
+  "configurations": [
+    {
+      "name": "macOS",
+      "compilerPath": "/usr/bin/clang",
+      "cStandard": "c11",
+      "includePath": [
+        "${workspaceFolder}/emulator",
+        "${workspaceFolder}/**",
+        "/opt/homebrew/opt/unicorn/include",
+        "/usr/local/opt/unicorn/include"
+      ],
+      "defines": []
+    },
+    {
+      "name": "Linux VM",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "c11",
+      "includePath": [
+        "${workspaceFolder}/emulator",
+        "${workspaceFolder}/**",
+        "/Users/kavishmuthum/homebrew/opt/unicorn/include"
+      ],
+      "defines": []
+    }
+  ],
+  "version": 4
+}
