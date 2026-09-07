@@ -100,11 +100,12 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * and map it into the guest at RAM_BASE with uc_mem_map_ptr (host-backed,
      * UC_PROT_ALL) so the device can translate guest addresses to host
      * pointers. Return -1 on failure. */
-
+    v->ram = calloc(RAM_SIZE);
+    uc_mem_map_ptr(v->uc, RAM_BASE, RAM_SIZE, UC_PROT_ALL, v->ram);
     /* TODO(student): register the serial/control MMIO region at SERIAL_BASE
      * (size SERIAL_SIZE) with uc_mmio_map, using serial_read / serial_write and
      * `v` as the user_data for both. */
-
+    uc_mmio_map(v->uc, SERIAL_BASE, SERIAL_SIZE, serial_read, serial_write, v);
     /* provided: allocate and initialize the device instance (its logic lives
      * in device.c) */
     v->dev = calloc(1, sizeof *v->dev);
@@ -117,11 +118,12 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
     /* TODO(student): register the logging device's MMIO region at DEV_BASE
      * (size DEV_SIZE) with uc_mmio_map, using vlog_device_mmio_read /
      * vlog_device_mmio_write and v->dev as the user_data for both. */
+    uc_mmio_map(v->uc, DEV_BASE, DEV_SIZE, vlog_device_mmio_read, vlog_device_mmio_write, v->dev);
 
     /* TODO(student): set the initial stack pointer. RSP goes just below the
      * reserved boot-info region (BOOTINFO_BASE), 16-byte aligned, via
      * uc_reg_write(UC_X86_REG_RSP, ...). The guest needs a stack to run. */
-
+    uc_reg_write(v->uc, UC_X86_REG_RSP, &(BOOTINFO_BASE - 16));
     /* provided: boot-parameter pointer. The guest receives BOOTINFO_BASE in
      * RDI (its main()'s first argument). Leave this as-is. */
     uint64_t rdi = BOOTINFO_BASE;
@@ -131,7 +133,7 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * uc_hook_add(..., UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0) so a guest
      * that touches unmapped memory faults cleanly instead of taking the
      * emulator down with it. */
-
+    uc_hook_add(v->uc, &h, UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0);
     /* provided: optional instruction tracing (--trace) */
     if (trace) {
         uc_hook h;
