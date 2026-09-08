@@ -69,6 +69,11 @@ static inline bool mem_invalid(uc_engine *uc, uc_mem_type type, uint64_t address
                                int size, int64_t value, void *user_data)
 {
     (void)uc; (void)type; (void)address; (void)size; (void)value; (void)user_data;
+    struct vmm *v = (struct vmm*)user_data;
+    v->faulted = 1;
+    v->fault_addr = address;
+    fprintf(stderr, "Invalid memory access\n");
+    uc_emu_stop(uc);
     return false;
 }
 
@@ -164,8 +169,28 @@ int vmm_load_binary(struct vmm *v, const char *path)
      * starting at v->ram (offset 0 == RAM_BASE), rejecting a file larger than
      * RAM_SIZE, then set the initial RIP to RAM_BASE (the entry point) with
      * uc_reg_write(UC_X86_REG_RIP, ...). Return 0 on success, -1 on error. */
-    v->ram = open
-    return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror("fopen binary");
+        return -1;
+    }    
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0 || (uint64_t)sz > RAM_SIZE) {
+        fprintf(stderr, "Binary size is bigger than RAM\n");
+        fclose(f);
+        return -1;
+    }
+    size_t n = fread(v->ram, 1, sz, f);
+    fclose(f);
+    if (n != (size_t)sz) {
+        fprintf(stderr, "short read loading binary\n");
+        return -1;
+    }
+    uint64_t rip = RAM_BASE;
+    uc_reg_write(v->uc, UC_X86_REG_RIP, &rip);
+    return 0;
 }
 
 /* provided: boot-parameter blob loader (used by the test harness via
@@ -197,13 +222,18 @@ int vmm_load_bootinfo(struct vmm *v, const char *path)
 
 int vmm_run(struct vmm *v)
 {
-    (void)v;
     /* TODO(student): start executing the guest from RIP (RAM_BASE) with
      * uc_emu_start. The guest never returns normally; it stops when the
      * POWEROFF register is written (your serial_write calls uc_emu_stop).
      *   - if the guest FAULTED (v->faulted), return VMM_EXIT_FAULT;
      *   - a Unicorn error while NOT powered off is a failure (return non-zero);
      *   - otherwise return v->exit_code. */
+    uc_err e = uc_emu_start(v->uc, RAM_BASE, 0, 0, 0);
+    if (v->faulted) {
+        return VMM_EXIT_FAULT;
+    } else if (v->powered_off) {
+        return v->exit_code;
+    }
     return 1;
 }
 
@@ -226,5 +256,12 @@ void *vmm_gpa_to_host(struct vmm *v, uint64_t gpa, uint64_t len)
      * host pointer into v->ram. Return NULL unless the ENTIRE range lies within
      * guest RAM [RAM_BASE, RAM_BASE + RAM_SIZE). Beware integer overflow when
      * checking the upper bound. See SPEC.md Part I, vmm_gpa_to_host. */
-    return NULL;
+    bool overflow = gpa + len > RAM_BASE + RAM_SIZE;
+    overflow = overflow || gpa > gpa + len;
+    bool underflow = gpa < RAM_BASE;
+    if (overflow || underflow) {
+        return NULL;
+    }
+    uint64_t host_addr = (uint64_t)v->ram + (gpa - RAM_BASE);
+    return (void *)host_addr;
 }
