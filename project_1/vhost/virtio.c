@@ -73,28 +73,119 @@
  */
 #include "virtq.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 /* ---- (a) guest-physical -> host-virtual -------------------------------- */
 
 void *virtq_gpa_to_hva(const struct virtq_mem *mem, uint64_t gpa, uint64_t len)
 {
-    (void)mem; (void)gpa; (void)len;
+    if (len == 0 || gpa + len < gpa)
+        return NULL;
 
-    /* TODO(student): find the region that fully contains [gpa, gpa+len) and
-     * return the host pointer for it; otherwise return NULL. See the notes
-     * above, and remember what vmm_gpa_to_host() had to guard against. */
+    for (unsigned i = 0; i < mem->nregions; i++) {
+        const struct virtq_mem_region *r = &mem->regions[i];
+        if (gpa < r->gpa)
+            continue;
+        uint64_t off = gpa - r->gpa;
+        if (off < r->size && len <= r->size - off)
+            return r->hva + off;
+    }
     return NULL;
 }
 
 /* ---- (b) the virtqueue ------------------------------------------------- */
 
+/* Snapshot a descriptor with one load per field: the guest can rewrite it
+ * between a check and a use, so only ever act on this copy. */
+static struct vring_desc read_desc(const struct vring_desc *src)
+{
+    return (struct vring_desc){
+        .addr  = __atomic_load_n(&src->addr,  __ATOMIC_RELAXED),
+        .len   = __atomic_load_n(&src->len,   __ATOMIC_RELAXED),
+        .flags = __atomic_load_n(&src->flags, __ATOMIC_RELAXED),
+        .next  = __atomic_load_n(&src->next,  __ATOMIC_RELAXED),
+    };
+}
+
+/* Append one readable descriptor's bytes to rec, truncating at the cap.
+ * Returns false if the guest gave us a range that does not translate. */
+static bool append_desc(const struct virtq_mem *mem, const struct vring_desc *d,
+                        char *rec, uint32_t *len)
+{
+    if (d->len == 0)
+        return true;
+    const void *src = virtq_gpa_to_hva(mem, d->addr, d->len);
+    if (!src)
+        return false;
+    uint32_t room = VIRTQ_MAX_RECORD - *len;
+    uint32_t n = d->len < room ? d->len : room;
+    memcpy(rec + *len, src, n);
+    *len += n;
+    return true;
+}
+
+/* Walk the chain starting at tbl[i], appending readable data to rec. A valid
+ * chain visits each of the n entries at most once, so n hops bounds a cycle.
+ * Returns false if the chain is malformed; whatever was gathered stays in rec. */
+static bool walk_chain(const struct vring_desc *tbl, unsigned n, unsigned i,
+                       bool nested, const struct virtq_mem *mem,
+                       char *rec, uint32_t *len)
+{
+    for (unsigned hops = 0; hops < n; hops++) {
+        if (i >= n)
+            return false;
+        struct vring_desc d = read_desc(&tbl[i]);
+
+        if (d.flags & VRING_DESC_F_INDIRECT) {
+            if (nested)
+                return false;
+            unsigned m = d.len / sizeof(struct vring_desc);
+            const struct vring_desc *itbl =
+                m ? virtq_gpa_to_hva(mem, d.addr, (uint64_t)m * sizeof *itbl) : NULL;
+            if (!itbl || !walk_chain(itbl, m, 0, true, mem, rec, len))
+                return false;
+        } else if (!(d.flags & VRING_DESC_F_WRITE)) {
+            if (!append_desc(mem, &d, rec, len))
+                return false;
+        }
+
+        if (!(d.flags & VRING_DESC_F_NEXT))
+            return true;
+        i = d.next;
+    }
+    return false;
+}
+
 int vlog_virtq_handle(struct virtq *vq, const struct virtq_mem *mem,
                       struct vlog_sink *sink)
 {
-    (void)vq; (void)mem; (void)sink;
+    uint16_t avail_idx = __atomic_load_n(&vq->avail->idx, __ATOMIC_RELAXED);
+    virtq_rmb();
 
-    /* TODO(student): process every available chain (see the recipe above) and
-     * return how many you completed. */
-    return 0;
+    /* more outstanding than the ring can hold means a broken driver */
+    if ((uint16_t)(avail_idx - vq->last_avail) > vq->num)
+        return 0;
+
+    int done = 0;
+    while (vq->last_avail != avail_idx) {
+        uint16_t head = __atomic_load_n(&vq->avail->ring[vq->last_avail % vq->num],
+                                        __ATOMIC_RELAXED);
+        char rec[VIRTQ_MAX_RECORD];
+        uint32_t len = 0;
+
+        if (head < vq->num)
+            walk_chain(vq->desc, vq->num, head, false, mem, rec, &len);
+        if (len)
+            vlog_sink_emit(sink, rec, len);
+
+        vq->used->ring[vq->used->idx % vq->num] =
+            (struct vring_used_elem){ .id = head, .len = 0 };
+        virtq_wmb();
+        vq->used->idx++;
+
+        vq->last_avail++;
+        done++;
+    }
+    return done;
 }
