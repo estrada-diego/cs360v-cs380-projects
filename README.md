@@ -14,5 +14,6 @@ projects reuse them.
   build a small VMM around an emulated CPU, give it a paravirtual logging device
   over MMIO, then rebuild that device as virtio and drive it from a real QEMU
   guest.
-
-_Projects 2 to 4 will be linked here as they are released._
+- **[Project 2: Minimal Container Runtime](project_2/)**: run a command inside a Linux container you build from scratch — namespaces,
+a pivot into a read-only rootfs, cgroup limits, dropped capabilities, and a
+seccomp filter — using the kernel features Docker also uses.
