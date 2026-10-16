@@ -18,3 +18,11 @@
 #
 # Your Makefile.uk then guards the library's sources with
 # $(CONFIG_APPRUNNER_STATS).
+
+config APPRUNNER_STATS
+	bool "Collect unikernel statistics (boot time, invocations)"
+	default y
+	help
+	  Builds libukstats, which records when boot finished, counts the
+	  invocations the runner serves, and answers INFO from inside the
+	  unikernel.

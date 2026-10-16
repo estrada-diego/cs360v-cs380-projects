@@ -33,3 +33,10 @@
 #
 # As shipped this file registers nothing, so the build produces no application
 # code and the image will not serve anything.
+
+$(eval $(call addlib,apprunner))
+APPRUNNER_SRCS-y += $(APPRUNNER_BASE)/../runner/runner.c
+
+$(eval $(call addlib,libukstats))
+LIBUKSTATS_BASE := $(APPRUNNER_BASE)/libukstats
+LIBUKSTATS_SRCS-$(CONFIG_APPRUNNER_STATS) += $(LIBUKSTATS_BASE)/ukstats.c

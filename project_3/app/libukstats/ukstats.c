@@ -66,3 +66,40 @@
  *   - invocations: your counter.
  *
  * Cast each number to long or unsigned long so it matches %ld or %lu. */
+
+#include <uk/init.h>
+#include <uk/alloc.h>
+#include <uk/plat/time.h>
+
+static __nsec boot_ns;
+static unsigned long invocations;
+
+static int ukstats_boot(void)
+{
+	boot_ns = ukplat_monotonic_clock();
+	printf("1 unikernel booted in %lu ms\n",
+	       (unsigned long)(boot_ns / 1000000));
+	return 0;
+}
+
+uk_late_initcall(ukstats_boot, 0);
+
+void runner_on_invoke(const char *fn)
+{
+	(void)fn;
+	invocations++;
+}
+
+int runner_platform_info(char *out, size_t n)
+{
+	struct uk_alloc *a = uk_alloc_get_default();
+	long freemem = a ? (long)uk_alloc_availmem(a) : -1;
+
+	snprintf(out, n,
+		 "platform=unikraft freemem=%ld uptime_ms=%lu boot_ms=%lu invocations=%lu",
+		 freemem,
+		 (unsigned long)(ukplat_monotonic_clock() / 1000000),
+		 (unsigned long)(boot_ns / 1000000),
+		 invocations);
+	return 0;
+}
