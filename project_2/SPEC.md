@@ -78,45 +78,81 @@ the namespaces to unshare (see `clone(2)` / `sched.h`):
 - `CLONE_NEWNET`: a **network** namespace: its own network stack, isolated from
   the host's interfaces (it starts with only a down loopback).
 
-**`container_write_idmaps(c, child)`**: a user namespace starts with an *empty*
-uid/gid map, and the child can do almost nothing until you fill it. From the
-parent, write (with the provided `write_file()`):
+**`container_write_idmaps(c, child)`**: inside a new user namespace, the child
+has no user or group id until the parent gives it one, and it can do almost
+nothing without one. You give it one by writing an *id map*: a line of the form
+`<id inside> <id outside> <how many ids>`.
 
-- `/proc/<child>/uid_map` <- `"0 <your-uid> 1"` (container id 0 -> your id, width 1);
-- `/proc/<child>/setgroups` <- `"deny"` (**required** before you may write gid_map);
-- `/proc/<child>/gid_map` <- `"0 <your-gid> 1"`.
+From the parent, write these three files with the provided `write_file()`, in
+this order:
+
+1. `/proc/<child>/uid_map` <- `"0 <your-uid> 1"`, where `<your-uid>` is
+   `getuid()`. This makes user 0 (root) inside the container the same user as
+   you outside;
+2. `/proc/<child>/setgroups` <- `"deny"`. This has to come before `gid_map`;
+3. `/proc/<child>/gid_map` <- `"0 <your-gid> 1"`, where `<your-gid>` is
+   `getgid()`.
 
 **Hostname**: inside `container_setup()` (which runs as the init), set the
 hostname to `c->hostname` with `sethostname(2)`.
 
-**Loopback**: the fresh network namespace starts with only a `lo` interface, and
-it is **down**. In `container_network()` bring it up so in-container localhost
-works: open an `AF_INET` `SOCK_DGRAM` socket, fill a `struct ifreq` with
-`ifr_name` `"lo"`, `ioctl(SIOCGIFFLAGS)` to read the flags, OR in
-`IFF_UP | IFF_RUNNING`, and `ioctl(SIOCSIFFLAGS)` to set them. This needs
-`CAP_NET_ADMIN` over the namespace, so `container_setup()` calls it **before**
-dropping capabilities. It is best-effort (a container without loopback still
-runs).
+**Loopback**: the container starts with one network interface, `lo` (loopback,
+which `localhost` uses), and it is switched off. `container_network()` switches
+it on.
 
-**Connecting the container to the host (`--net`).** By default the container is
-network-isolated (only loopback). With `--net`, the runtime attaches it to the
-host through a **veth pair on a bridge**, the same arrangement as Docker's
-default network, so a process on the host can reach a server inside the container:
+Open a socket with `socket(AF_INET, SOCK_DGRAM, 0)`. Then, with a
+`struct ifreq` whose `ifr_name` is `"lo"`:
+
+1. read its flags: `ioctl(SIOCGIFFLAGS)`;
+2. add `IFF_UP | IFF_RUNNING` to them;
+3. write them back: `ioctl(SIOCSIFFLAGS)`.
+
+If this fails, print a warning and return 0: the container still runs without
+loopback.
+
+In `container_setup()`, call `container_network()` before the Part III steps.
+Switching `lo` on needs root's powers, and Part III takes them away.
+
+**Connecting the container to the host (`--net`).** Only one test needs this:
+"a server in the container is reachable over --net". All the other tests run
+the container without `--net`, so you can leave this section until last.
+
+Normally the container's only network is loopback. With `--net`, the host can
+reach a server running inside the container. The provided code (`net.c`) gives
+the container a network interface, `c->net_ifname`, that is connected to the
+host:
 
 ```text
-  host: [ cvbr0 10.44.0.1/24 ]---veth---[ ceth0 10.44.0.2/24 ] :container
+  host (10.44.0.1) <-----> ceth0 (10.44.0.2), inside the container
 ```
 
-The **host side is provided** (`net.c`): `container_net_host_setup()` makes the
-bridge, creates the veth pair, and moves one end into the container's netns; you
-call it from `container_run()` (after the cgroup step, before releasing the
-child), and `container_net_host_teardown()` after the child is reaped. You
-implement the **container side**, `container_net_config()`: give the interface
-`c->net_ifname` the address `c->net_ip`/`c->net_prefix` (`ioctl` `SIOCSIFADDR`,
-`SIOCSIFNETMASK`), bring it up (`SIOCSIFFLAGS`), and add a default route via
-`c->net_gw` (a `struct rtentry` with `RTF_UP | RTF_GATEWAY`, `ioctl SIOCADDRT`).
-It needs `CAP_NET_ADMIN`, so `container_setup()` calls it (when `c->net_enabled`)
-before the capability drop.
+**Two functions in `net.c` are already written for you.** You only call them,
+from `container_run()`, if `c->net_enabled` is set:
+
+- `container_net_host_setup(c, child)` creates the interface. Call it after
+  `container_cgroup_enter()` and before you release the child;
+- `container_net_host_teardown(c)` cleans up the connection. Call it after
+  `waitpid()`.
+
+**You write `container_net_config()`.** It runs inside the container and sets up
+the interface `c->net_ifname` (`ceth0`). This is the interface created by
+`container_net_host_setup()` above.
+
+Open a socket with `socket(AF_INET, SOCK_DGRAM, 0)`, the same as in
+`container_network()`. Then make these `ioctl()` calls on it. Steps 1 to 3 each
+take a `struct ifreq` whose `ifr_name` is `c->net_ifname`:
+
+1. set its address to `c->net_ip`: `SIOCSIFADDR`;
+2. set its netmask from `c->net_prefix`: `SIOCSIFNETMASK`;
+3. switch it on: read its flags with `SIOCGIFFLAGS`, add `IFF_UP | IFF_RUNNING`,
+   and write them back with `SIOCSIFFLAGS`, the same as in `container_network()`;
+4. add a default route through the host, `c->net_gw`, so the container can reply
+   to any address, not just `10.44.0.x`: fill a `struct rtentry` with gateway
+   `c->net_gw` and flags `RTF_UP | RTF_GATEWAY`, then `SIOCADDRT`.
+
+In `container_setup()`, if `c->net_enabled` is set, call
+`container_net_config(c)` right after `container_network()`. Like loopback, it
+needs root's powers, so it must come before the Part III steps.
 
 ---
 
@@ -133,24 +169,34 @@ order; each step depends on the one before it:
    (`mount(c->rootfs, c->rootfs, NULL, MS_BIND | MS_REC, NULL)`), then **remount
    that bind read-only** (`MS_BIND | MS_REMOUNT | MS_RDONLY`): the container
    cannot modify its own image.
-3. **Mount a writable `/tmp`**: a fresh tmpfs on `<rootfs>/tmp`.
-4. **Set up `/dev`**: a tmpfs on `<rootfs>/dev`, then **bind** the host's
-   `/dev/null` and `/dev/zero` onto empty files there. (You cannot `mknod(2)` a
-   device in a user namespace, so you bind the real nodes in instead.) Mounting
-   the tmpfs hides whatever was in `<rootfs>/dev` before, including the empty
-   files `make-rootfs.sh` put there, so create the bind targets yourself after
-   mounting it: `open(path, O_CREAT | O_WRONLY, 0666)`, then close the
-   descriptor. Without them the bind fails with `ENOENT`.
+3. **Mount a writable `/tmp`.** The root is now read-only, so give the container
+   an empty, writable filesystem in memory (a *tmpfs*) at `/tmp`:
+   `mount("tmpfs", "<rootfs>/tmp", "tmpfs", 0, NULL)`.
+4. **Set up `/dev`**. The container cannot create device files itself, so it
+   borrows the host's `/dev/null` and `/dev/zero`:
+   1. mount a tmpfs on `<rootfs>/dev`;
+   2. create empty files `<rootfs>/dev/null` and `<rootfs>/dev/zero`:
+      `open(path, O_CREAT | O_WRONLY, 0666)`, then `close()`. (The tmpfs hides
+      the ones `make-rootfs.sh` made, and without them the bind below fails
+      with `ENOENT`.);
+   3. make each empty file show the host's device instead, with a *bind mount*:
+      `mount("/dev/null", "<rootfs>/dev/null", NULL, MS_BIND, NULL)`, and the
+      same for `zero`.
 5. **Mount a fresh `/proc`**: `mount("proc", "<rootfs>/proc", "proc", 0, NULL)`.
-   This is what lets the container see only its own processes. Mount it **before** you switch roots, while the host's `/proc`
-   is still visible in your mount namespace. Mounting a new `/proc` inside a user
-   namespace is only permitted when a `/proc` is already visible there, so doing
-   this after detaching the old root fails with `EPERM`.
-6. **Switch roots**: `pivot_root(2)` into the rootfs and detach the old one, then
-   `chdir("/")`. (The idiom `pivot_root(".", ".")` after `chdir(rootfs)` avoids
-   needing a separate directory for the old root; `umount2(".", MNT_DETACH)`
-   drops it.) There is no glibc wrapper for `pivot_root`, so call it through
-   `syscall(SYS_pivot_root, ".", ".")`.
+   This is what lets the container see only its own processes. Do it **before**
+   step 6: the kernel only allows it while the host's `/proc` is still visible,
+   and fails with `EPERM` afterwards.
+6. **Switch roots**. Until now, the container still sees the host's whole
+   filesystem, and the rootfs is just one directory in it. This step makes the
+   rootfs the container's `/` and takes the host's files out of its view:
+   1. `chdir(c->rootfs)`: move into the rootfs;
+   2. `syscall(SYS_pivot_root, ".", ".")`: make the current directory (the
+      rootfs) the new `/`. The host's old `/` is still attached, on top of the
+      new one. (There is no glibc `pivot_root()` function, so you call it
+      through `syscall`.);
+   3. `umount2(".", MNT_DETACH)`: remove the host's old `/`, so the container
+      can no longer reach any host files;
+   4. `chdir("/")`: move to the new `/`.
 
 ---
 
@@ -162,40 +208,53 @@ so that the steps above still have the privileges and syscalls they need.
 
 ### Capabilities
 
-Drop every capability:
+A capability is one piece of root's power. Drop them all, in this order:
 
-- empty the **bounding set** so no future `exec` can regain a capability:
-  `prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)` for every `cap` in `0 .. CAP_LAST_CAP`;
-- clear the permitted / effective / inheritable sets with `capset(2)`. There is
-  no glibc wrapper, so call it through `syscall(SYS_capset, &hdr, data)` with a
-  `struct __user_cap_header_struct` whose version is
-  `_LINUX_CAPABILITY_VERSION_3`, and a **two**-element
-  `struct __user_cap_data_struct` array, since version 3 covers two 32-bit
-  words (`<linux/capability.h>`);
-- set `PR_SET_NO_NEW_PRIVS` so a setuid bit cannot hand privileges back.
+1. **Empty the list of capabilities the command is allowed to have.** Linux
+   keeps a list of the capabilities a process, and any program it starts, may
+   have. For every `cap` from 0 to `CAP_LAST_CAP`, call
+   `prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)` to remove `cap` from that list. Do
+   this before step 2: it needs root's powers, and step 2 takes them away.
+2. **Drop the capabilities you hold now** with `capset`. glibc has no `capset()`
+   function, so call `syscall(SYS_capset, &hdr, data)`, where:
+   - `hdr` is a `struct __user_cap_header_struct` with version
+     `_LINUX_CAPABILITY_VERSION_3`;
+   - `data` is an array of **two** `struct __user_cap_data_struct`, all zero.
+
+   Both are in `<linux/capability.h>`.
+3. **Block setuid programs:** `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`, so running
+   one cannot give capabilities back.
 
 ### Seccomp
 
-Capabilities gate *privileged* operations. A **seccomp** filter restricts which
-**system calls** the process may make, privileged or not; it is the mechanism
-behind Docker's default profile. In `container_seccomp()`, install a
-seccomp-BPF filter that denies a denylist of dangerous syscalls with `EPERM` and
-allows everything else. Using `<linux/filter.h>` and `<linux/seccomp.h>`, build a
-`struct sock_filter[]` that:
+Dropping capabilities stops root from doing privileged things. A **seccomp**
+filter goes further: it blocks chosen system calls completely, for any user. The
+kernel runs the filter every time the process makes a system call, and the
+filter decides whether to allow it.
 
-1. loads `seccomp_data.arch` and rejects a foreign syscall ABI (compare against
-   `AUDIT_ARCH_X86_64` or `AUDIT_ARCH_AARCH64` for your build architecture, so
-   the same filter works on either architecture);
-2. loads `seccomp_data.nr` and, for each denied `__NR_*` (for example `ptrace`,
-   `mount`, `umount2`, `pivot_root`, `chroot`, `setns`, `unshare`, `reboot`,
-   `swapon`/`swapoff`, `kexec_load`, and the `*_module` calls), returns
-   `SECCOMP_RET_ERRNO | EPERM`;
-3. otherwise returns `SECCOMP_RET_ALLOW`.
+In `container_seccomp()`, install a filter that makes these system calls fail
+with `EPERM` and allows everything else: `ptrace`, `mount`, `umount2`,
+`pivot_root`, `chroot`, `setns`, `unshare`, `reboot`, `swapon`, `swapoff`,
+`kexec_load`, `init_module`, `finit_module`, `delete_module`.
 
-Then `prctl(PR_SET_NO_NEW_PRIVS, 1, ...)` and
-`syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog)`. The filter is
-inherited across the `fork`/`exec`, so it also covers the command.
-`container_setup()` calls this **last**.
+The filter is a small program: an array of `struct sock_filter` instructions,
+which you write with the `BPF_STMT` and `BPF_JUMP` macros (`<linux/filter.h>`,
+`<linux/seccomp.h>`). `man 2 seccomp` has an example. Your filter should:
+
+1. load `seccomp_data.arch` (which CPU architecture the system call is for). If
+   it is not this machine's, return `SECCOMP_RET_KILL_PROCESS`. Compare against
+   `AUDIT_ARCH_X86_64` on x86-64 or `AUDIT_ARCH_AARCH64` on ARM
+   (`<linux/audit.h>`);
+2. load `seccomp_data.nr` (the system call number). For each system call in the
+   list above, compare it against that call's number (`__NR_ptrace`,
+   `__NR_mount`, ...), and return `SECCOMP_RET_ERRNO | EPERM` if it matches;
+3. otherwise, return `SECCOMP_RET_ALLOW`.
+
+To install it, put the array and its length in a `struct sock_fprog prog`, then
+call `syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog)`. This only works
+after `PR_SET_NO_NEW_PRIVS`, which the capabilities steps already set. The
+command inherits the filter when your init starts it. `container_setup()` calls
+this **last**.
 
 ---
 
@@ -204,56 +263,73 @@ inherited across the `fork`/`exec`, so it also covers the command.
 The cloned child is **PID 1** in the container's PID namespace: it is the
 container's **init**. It launches the command and reaps orphans. In `container_init()`:
 
-1. **Wait to be released.** The parent must write your id-maps and put you in the
-   cgroup before you run. Close `c->sync[1]`, read one byte from `c->sync[0]`
-   (it blocks until the parent writes it), then close `c->sync[0]`. Then call
-   `container_setup(c)`.
-2. **Launch the command as a child.** `fork()`; in the child, `execvp(c->argv[0],
-   c->argv)`. The command is therefore **PID 2**, and you remain PID 1.
-   Leave the descriptors the command inherits alone: do not set `FD_CLOEXEC` on
-   anything but your own, and do not close what you did not open. The test suite
-   passes the command a descriptor and holds that descriptor open to keep the
-   container alive while it inspects the container from the host.
-3. **Reap.** Loop `waitpid(-1, &st, 0)`: reap every child that dies, including
-   orphans the kernel re-parents to PID 1. Stop when the **command itself** is
-   reaped, and return its exit status (the low 8 bits of `WEXITSTATUS`, or
-   `128 + signal` if it was killed). That value is what the container exits with.
+1. **Wait for the parent.** Before you do anything, the parent has to write your
+   id maps (Part I) and put you in the cgroup (Part V). It tells you it is done
+   by writing one byte to the `c->sync` pipe. So:
+   1. close `c->sync[1]`, the write end (only the parent writes);
+   2. read one byte from `c->sync[0]`. This waits until the parent writes it;
+   3. close `c->sync[0]`.
 
-Without a reaping PID 1, orphaned processes accumulate as zombies for as long as
-the container runs.
+   Then call `container_setup(c)`.
+2. **Start the command.** Call `fork()`. In the new process, call
+   `execvp(c->argv[0], c->argv)` to run the command. The command becomes
+   **PID 2**, and your init stays PID 1.
+
+   Do not close any file descriptors you did not open yourself. The tests give
+   the command an open file descriptor, and use it to keep the container
+   running while they check it.
+3. **Wait for the command to exit.** When a process exits, it stays in the
+   process table as a *zombie* until its parent collects it with `waitpid()`.
+   If a process's parent exits first, the kernel makes PID 1 (your init) its
+   parent, so your init has to collect those processes too.
+
+   Call `waitpid(-1, &st, 0)` in a loop. Each call collects one process that
+   has exited. When the pid it returns is the command's (the pid `fork()`
+   returned in step 2), stop and return the command's exit status:
+   - `WEXITSTATUS(st)` if it exited normally;
+   - `128 + WTERMSIG(st)` if a signal killed it.
+
+   The container exits with the value you return.
 
 ---
 
 ## Part V: The cgroup (resource limits)
 
-A cgroup limits what the container may consume. On cgroup v2 every cgroup is a
-directory under `/sys/fs/cgroup`.
+A cgroup (control group) is a group of processes that the kernel puts limits
+on. Here, it limits how many processes the container can run and how much
+memory it can use. Each cgroup is a directory under `/sys/fs/cgroup`, and you set
+its limits by writing to files in that directory.
 
 **`container_cgroup_init(c)`** (parent, before the child runs):
 
-- a controller only works in a cgroup if its parent **delegated** it, so first
-  enable the controllers you need in the base cgroup:
-  write `"+pids +memory"` to `<cgroup_base>/cgroup.subtree_control`;
-- `mkdir` `<cgroup_base>/<name>` and store that path in `c->cg_path` (cleanup
-  needs it). Treat `EEXIST` as success: a run that crashed or was killed leaves
-  its cgroup behind, and the next run must still start;
-- write `c->pids_max` to `<cg_path>/pids.max` and `c->mem_max` to
-  `<cg_path>/memory.max` (a limit of `-1` means the literal string `"max"`), and
-  write `"0"` to `<cg_path>/memory.swap.max` so that hitting the memory cap
-  **OOM-kills** the offending process instead of swapping it out.
+1. **Turn on the limits you need.** A new cgroup can only use the process and
+   memory limits if its parent directory allows them. Write `"+pids +memory"` to
+   `<cgroup_base>/cgroup.subtree_control`.
+2. **Create the container's cgroup:** `mkdir` `<cgroup_base>/<name>`, and save
+   that path in `c->cg_path` (cleanup needs it). If `mkdir` fails with `EEXIST`,
+   carry on: a run that crashed can leave the directory behind, and the next run
+   must still work.
+3. **Set the limits** by writing to files in `c->cg_path`:
+   - `pids.max` <- `c->pids_max`;
+   - `memory.max` <- `c->mem_max`;
+   - `memory.swap.max` <- `"0"`. Without this, a process that goes over the
+     memory limit is moved to swap instead of being killed.
+
+   If a limit is `-1`, write the string `"max"` (no limit) instead.
 
 **`container_cgroup_enter(c, child)`** (parent, after `clone`): write the child's
-pid to `<cg_path>/cgroup.procs`. Moving a process into the cgroup moves it and
-all its future children, so the whole container is accounted and limited.
+pid to `<cg_path>/cgroup.procs`. Every process the child starts later is put in
+the same cgroup, so the limits cover the whole container.
 
 ---
 
 ## Part VI: Teardown
 
-**`container_cleanup(c)`** (parent, after the child is reaped): the container's
-mounts lived in its mount namespace, which the kernel destroyed along with the
-process, so the only host-side state left is the cgroup directory. It is empty by
-now: `rmdir(c->cg_path)`, and ignore `ENOENT` if it has already gone.
+**`container_cleanup(c)`** (parent, after `waitpid()` returns): remove the
+cgroup directory with `rmdir(c->cg_path)`. If it fails with `ENOENT`, the
+directory is already gone, so ignore it.
+
+That is the only cleanup you need. The mounts from Part II disappear on their
+own when the container exits.
 
 ---
-
