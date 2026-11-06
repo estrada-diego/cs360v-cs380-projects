@@ -1,0 +1,21 @@
+# Project 4's container. See SETUP.md.
+#
+# Run these from this directory (project_4/setup/):
+#   docker compose up -d --build         # build + start
+#   docker compose exec dev bash         # a shell inside the container
+#   docker compose down                  # when you are finished
+#
+# Note it is `docker compose` (two words), not `docker-compose`.
+name: cs360v-p4
+
+services:
+  dev:
+    build:
+      context: .
+
+    # The whole project_4 folder, live inside the container at /work: edit
+    # platform/serverless.py in your normal editor and the container sees the
+    # change at once. No rebuild.
+    volumes:
+      - ..:/work
+    working_dir: /work

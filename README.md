@@ -20,3 +20,7 @@ seccomp filter — using the kernel features Docker also uses.
 - **[Project 3: A Unikernel](project_3/)**: build a small server program into a
   Unikraft unikernel, add a kernel library of your own, and write a tool that
   deploys instances under QEMU and measures how fast they start.
+- **[Project 4: A Serverless Platform](project_4/)**: build a platform in Python
+  that runs function calls on a set of backend servers, checks which backends are
+  up, spreads calls across them, handles backends that hang or die, and starts
+  more backends under heavy load.

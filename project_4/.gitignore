@@ -1,0 +1,7 @@
+# the platform is a plain Python program; these are the only by-products
+__pycache__/
+*.pyc
+# a registry file if you point --registry at the project dir
+*.json
+# a runner binary if you build one here for local testing
+runner/runner
