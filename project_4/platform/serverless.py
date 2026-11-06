@@ -228,7 +228,28 @@ class Platform:
              self.FAIL_THRESHOLD.
 
         Change b["up"], b["fails"] and b["funcs"] while holding self.lock."""
-        pass
+        funcs = None
+        try:
+            reply = runner_call(b["host"], b["port"], "PING", 1.5)
+            if reply == "PONG":
+                freply = runner_call(b["host"], b["port"], "FUNCS", 1.5)
+                parts = freply.split()
+                if parts and parts[0] == "OK":
+                    funcs = set(parts[1:])
+                else:
+                    funcs = set()
+        except OSError:
+            funcs = None
+
+        with self.lock:
+            if funcs is not None:
+                b["funcs"] = funcs
+                b["fails"] = 0
+                b["up"] = True
+            else:
+                b["fails"] += 1
+                if b["fails"] >= self.FAIL_THRESHOLD:
+                    b["up"] = False
 
     def backends_status(self):
         """TODO(student) Part II: for GET /backends, return a list with one
@@ -236,7 +257,20 @@ class Platform:
         "outstanding", "invocations", "errors", and "avg_latency_ms"
         (latency_sum / invocations, in milliseconds; 0 if there are no
         invocations). Hold self.lock."""
-        return []
+        with self.lock:
+            out = []
+            for b in self.backends:
+                n = b["invocations"]
+                out.append({
+                    "backend": f"{b['host']}:{b['port']}",
+                    "up": b["up"],
+                    "funcs": sorted(b["funcs"]),
+                    "outstanding": b["outstanding"],
+                    "invocations": n,
+                    "errors": b["errors"],
+                    "avg_latency_ms": (b["latency_sum"] / n * 1000.0) if n else 0,
+                })
+            return out
 
     def _note_failure(self, b):
         """PROVIDED: call this when a request to `b` fails. No more requests go
