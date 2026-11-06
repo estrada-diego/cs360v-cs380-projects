@@ -300,13 +300,29 @@ class Platform:
 
         Do not call lookup() or anything else that takes self.lock in here: you
         already hold it, and taking it a second time hangs forever."""
-        return None
+        with self.slot_free:
+            while True:
+                capable = [b for b in self.backends
+                           if b["up"] and function in b["funcs"]]
+                if not capable:
+                    return None
+                free = [b for b in capable if b["outstanding"] < self.MAX_OUTSTANDING]
+                if free:
+                    b = min(free, key=lambda b: (b["outstanding"], b["invocations"]))
+                    b["outstanding"] += 1
+                    return b
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return "timeout"
+                self.slot_free.wait(timeout=remaining)
 
     def _release(self, b):
         """TODO(student) Part III: give back the slot _acquire took. Inside
         `with self.slot_free:`, subtract 1 from b["outstanding"] and wake one
         waiting request with self.slot_free.notify()."""
-        pass
+        with self.slot_free:
+            b["outstanding"] -= 1
+            self.slot_free.notify()
 
     # ---- autoscaling --------------------------------------------------
     #
@@ -446,7 +462,70 @@ class Platform:
 
         Catch socket.timeout before OSError: socket.timeout is a kind of
         OSError. Hold self.lock whenever you change a counter."""
-        return 500, {"error": "invoke not implemented"}
+        entry = self.lookup(name)
+        if entry is None:
+            return 404, {"error": f"{name} is not deployed"}
+        function = entry["function"]
+
+        with self.lock:
+            self.metrics_data["invocations"] += 1
+            by_fn = self.metrics_data["by_function"]
+            by_fn[name] = by_fn.get(name, 0) + 1
+
+        deadline = time.monotonic() + self.invoke_timeout
+        while time.monotonic() < deadline:
+            b = self._acquire(function, deadline)
+            if b is None:
+                with self.lock:
+                    self.metrics_data["no_backend"] += 1
+                return 503, {"error": f"no backend is up that runs {function}"}
+            if b == "timeout":
+                with self.lock:
+                    self.metrics_data["rejected"] += 1
+                return 503, {"error": "all backends are busy"}
+
+            addr = f"{b['host']}:{b['port']}"
+            t0 = time.monotonic()
+            try:
+                timeout = max(0.05, deadline - time.monotonic())
+                reply = runner_call(b["host"], b["port"], f"RUN {function} {payload}", timeout)
+            except socket.timeout:
+                self._release(b)
+                with self.lock:
+                    self.metrics_data["timeouts"] += 1
+                    b["errors"] += 1
+                self._note_failure(b)
+                return 504, {"error": f"backend {addr} timed out"}
+            except OSError:
+                self._release(b)
+                with self.lock:
+                    b["errors"] += 1
+                self._note_failure(b)
+                continue                      # try another backend
+            else:
+                self._release(b)
+            elapsed = time.monotonic() - t0
+
+            if reply.startswith("OK"):
+                with self.lock:
+                    self.metrics_data["successes"] += 1
+                    b["latency_sum"] += elapsed
+                    b["invocations"] += 1
+                return 200, {"result": reply[3:].strip(), "backend": addr}
+            if reply.startswith("ERR"):
+                with self.lock:
+                    self.metrics_data["errors"] += 1
+                    b["errors"] += 1
+                return 400, {"error": reply[4:].strip() or "function error", "backend": addr}
+            # anything else is an unexpected reply: treat it as a backend error
+            with self.lock:
+                self.metrics_data["errors"] += 1
+                b["errors"] += 1
+            return 502, {"error": f"unexpected reply from {addr}: {reply}"}
+
+        with self.lock:
+            self.metrics_data["errors"] += 1
+        return 502, {"error": "no backend answered before the deadline"}
 
     # ---- metrics: what you implement ----------------------------------
 
